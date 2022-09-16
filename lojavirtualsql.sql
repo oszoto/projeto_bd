@@ -1,0 +1,224 @@
+DROP DATABASE IF EXISTS lojavirtual;
+CREATE DATABASE lojavirtual;
+USE lojavirtual;
+
+CREATE TABLE CLIENTE (
+	cpf CHAR(11) PRIMARY KEY,
+    nome VARCHAR(85) NOT NULL,
+    dataNasc DATE NOT NULL,
+    foto BLOB DEFAULT NULL,
+    sacola FLOAT DEFAULT 0 NOT NULL,
+    CHECK (sacola >= 0)
+);
+
+CREATE TABLE ENDERECO (
+	cod_end INT AUTO_INCREMENT PRIMARY KEY,
+    cep CHAR(8) NOT NULL,
+    complemento VARCHAR(45) NOT NULL,
+    estado CHAR(2) NOT NULL,
+    cidade VARCHAR(45) NOT NULL
+);
+
+CREATE TABLE CARTAO (
+	numero CHAR(16) PRIMARY KEY,
+    vencimento DATE NOT NULL,
+    cvv CHAR(3) NOT NULL
+);
+
+CREATE TABLE CATEGORIA (
+	cod_categ INT AUTO_INCREMENT PRIMARY KEY,
+    categ VARCHAR(45) NOT NULL
+);
+
+CREATE TABLE PRODUTO (
+	cod_prod INT AUTO_INCREMENT PRIMARY KEY,
+    nome VARCHAR(45) NOT NULL,
+    preco FLOAT NOT NULL,
+    estoque INT DEFAULT 0 NOT NULL,
+    CHECK (estoque >= 0)
+);
+
+CREATE TABLE FORNECEDOR (
+	cnpj CHAR(14) PRIMARY KEY,
+    nome VARCHAR(85) NOT NULL
+);
+
+CREATE TABLE FORNECEDOR_PRODUTO (
+	cnpj CHAR(14),
+    cod_prod INT,
+    dataHora DATETIME,
+    qtd INT NOT NULL,
+    PRIMARY KEY (cnpj, cod_prod, dataHora),
+    FOREIGN KEY (cnpj) REFERENCES FORNECEDOR(cnpj),
+    FOREIGN KEY (cod_prod) REFERENCES PRODUTO(cod_prod)
+);
+
+CREATE TABLE ALTERASACOLA (
+    cod_op INT AUTO_INCREMENT PRIMARY KEY,
+    op ENUM('I', 'D') NOT NULL,
+    qtd INT NOT NULL
+);
+
+CREATE TABLE PEDIDO (
+	cod_ped INT AUTO_INCREMENT PRIMARY KEY,
+    dataPedido DATE NOT NULL,
+    gasto FLOAT NOT NULL
+);
+
+CREATE TABLE CLIENTE_CARTAO (
+	cpf CHAR(11),
+    numero CHAR(16),
+    PRIMARY KEY (cpf, numero),
+    FOREIGN KEY (cpf) REFERENCES CLIENTE(cpf),
+    FOREIGN KEY (numero) REFERENCES CARTAO(numero)
+);
+
+CREATE TABLE CLIENTE_ENDERECO (
+	cpf CHAR(11),
+    cod_end INT,
+    PRIMARY KEY (cpf, cod_end),
+    FOREIGN KEY (cpf) REFERENCES CLIENTE(cpf),
+    FOREIGN KEY (cod_end) REFERENCES ENDERECO(cod_end)
+);
+
+ALTER TABLE ALTERASACOLA
+ADD COLUMN cod_prod INT,
+ADD COLUMN cpf CHAR(11),
+ADD FOREIGN KEY (cod_prod) REFERENCES PRODUTO(cod_prod),
+ADD FOREIGN KEY (cpf) REFERENCES CLIENTE(cpf);
+
+ALTER TABLE PRODUTO 
+ADD COLUMN cod_categ INT,
+ADD FOREIGN KEY (cod_categ) REFERENCES CATEGORIA(cod_categ);
+
+ALTER TABLE PEDIDO 
+ADD COLUMN cpf CHAR(11),
+ADD COLUMN cod_end INT,
+ADD COLUMN numero CHAR(16),
+ADD FOREIGN KEY (cpf) REFERENCES CLIENTE(cpf),
+ADD FOREIGN KEY (cod_end) REFERENCES ENDERECO(cod_end),
+ADD FOREIGN KEY (numero) REFERENCES CARTAO(numero);
+
+CREATE TRIGGER fazPedido AFTER INSERT ON PEDIDO FOR EACH ROW CALL verificaPedido(NEW.cpf, NEW.cod_end, NEW.numero);
+
+CREATE TRIGGER forneceProduto AFTER INSERT ON FORNECEDOR_PRODUTO FOR EACH ROW UPDATE PRODUTO SET estoque = estoque + NEW.qtd WHERE PRODUTO.cod_prod = NEW.cod_prod;
+
+CREATE TRIGGER mudaSacola BEFORE INSERT ON ALTERASACOLA FOR EACH ROW CALL verificaOP(NEW.cpf, NEW.cod_prod, NEW.op, NEW.qtd);
+
+DELIMITER $$
+CREATE PROCEDURE verificaOP(cpf_entrada CHAR(11), cod_prod_entrada INT, op_entrada ENUM('I', 'D'), qtd_entrada INT)
+BEGIN
+DECLARE preco_var FLOAT;
+DECLARE score INT;
+SET preco_var = (select preco FROM PRODUTO WHERE cod_prod = cod_prod_entrada);
+SET score = (select ifnull(sum(qtd), 0) FROM ALTERASACOLA WHERE cod_prod = cod_prod_entrada and op = 'I' and cpf = cpf_entrada) - (select ifnull(sum(qtd),0) FROM ALTERASACOLA WHERE cod_prod = cod_prod_entrada and op = 'D' and cpf = cpf_entrada);
+IF op_entrada = 'I' THEN
+	UPDATE PRODUTO SET estoque = estoque - qtd_entrada WHERE cod_prod = cod_prod_entrada;
+    UPDATE CLIENTE SET sacola = sacola + (qtd_entrada * preco_var) WHERE cpf = cpf_entrada;
+ELSEIF op_entrada = 'D' and score - qtd_entrada >= 0 THEN
+	UPDATE CLIENTE SET sacola = sacola - (qtd_entrada * preco_var) WHERE cpf = cpf_entrada;
+	UPDATE PRODUTO SET estoque = estoque + qtd_entrada WHERE PRODUTO.cod_prod = cod_prod_entrada;
+ELSE
+	SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Quantidade maior que a colocada';
+END IF;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE PROCEDURE verificaPedido(cpf_entrada CHAR(11), cod_end_entrada INT, numero_entrada CHAR(16))
+BEGIN
+IF NOT EXISTS(SELECT NULL FROM CLIENTE_CARTAO WHERE cpf = cpf_entrada and numero = numero_entrada) THEN
+	INSERT INTO CLIENTE_CARTAO VALUES (cpf_entrada, numero_entrada);
+END IF;
+IF NOT EXISTS(SELECT NULL FROM CLIENTE_ENDERECO WHERE cpf = cpf_entrada and cod_end = cod_end_entrada) THEN
+	INSERT INTO CLIENTE_ENDERECO VALUES (cpf_entrada, cod_end_entrada);
+END IF;
+UPDATE CLIENTE SET sacola = 0 WHERE cpf = cpf_entrada;
+END $$
+DELIMITER ;
+
+CREATE FUNCTION recuperaGasto(cpf_entrada CHAR(11))
+	RETURNS FLOAT
+    DETERMINISTIC
+	RETURN (SELECT sacola FROM CLIENTE WHERE cpf = cpf_entrada);
+    
+CREATE VIEW maiorProcura AS SELECT PRODUTO.cod_prod, PRODUTO.nome, count(*) AS qtdprocuras FROM PRODUTO LEFT JOIN ALTERASACOLA ON PRODUTO.cod_prod = ALTERASACOLA.cod_prod AND op = 'I' GROUP BY PRODUTO.cod_prod ORDER BY count(*) DESC;
+
+INSERT INTO CLIENTE (cpf, nome, dataNasc) VALUES ('04786277185', 'Gabriel', '2002-07-27');
+INSERT INTO CLIENTE (cpf, nome, dataNasc) VALUES ('38398756217', 'Gerson', '2001-08-24');
+INSERT INTO CLIENTE (cpf, nome, dataNasc) VALUES ('32438247832', 'Gabriel', '2000-01-15');
+INSERT INTO CLIENTE (cpf, nome, dataNasc) VALUES ('04737482398', 'Anderson', '2008-05-02');
+INSERT INTO CLIENTE (cpf, nome, dataNasc) VALUES ('27432874929', 'Lorena', '1973-11-11');
+
+INSERT INTO ENDERECO (cep, complemento, estado, cidade) VALUES ('70660086', '415', 'DF', 'Brasília');
+INSERT INTO ENDERECO (cep, complemento, estado, cidade) VALUES ('75097105', '9485', 'GO', 'Anápolis');
+INSERT INTO ENDERECO (cep, complemento, estado, cidade) VALUES ('65082783', '112', 'MA', 'São Luís');
+INSERT INTO ENDERECO (cep, complemento, estado, cidade) VALUES ('40720290', '541', 'BA', 'Salvador');
+INSERT INTO ENDERECO (cep, complemento, estado, cidade) VALUES ('78098565', '865', 'MT', 'Cuiába');
+
+INSERT INTO CARTAO (numero, vencimento, cvv) VALUES ('4783948503493595', '2025-06-01', '872');
+INSERT INTO CARTAO (numero, vencimento, cvv) VALUES ('4375834757738500', '2026-04-01', '342');
+INSERT INTO CARTAO (numero, vencimento, cvv) VALUES ('8274823948324882', '2023-10-01', '282');
+INSERT INTO CARTAO (numero, vencimento, cvv) VALUES ('2435647432314164', '2023-05-01', '349');
+INSERT INTO CARTAO (numero, vencimento, cvv) VALUES ('4395839091758473', '2022-04-01', '028');
+
+INSERT INTO CLIENTE_CARTAO VALUES ('04786277185', '4783948503493595');
+INSERT INTO CLIENTE_CARTAO VALUES ('04737482398', '4395839091758473');
+INSERT INTO CLIENTE_CARTAO VALUES ('38398756217', '4783948503493595');
+INSERT INTO CLIENTE_CARTAO VALUES ('32438247832', '4395839091758473');
+INSERT INTO CLIENTE_CARTAO VALUES ('27432874929', '4395839091758473');
+
+INSERT INTO CLIENTE_ENDERECO VALUES ('04786277185', 1);
+INSERT INTO CLIENTE_ENDERECO VALUES ('04737482398', 2);
+INSERT INTO CLIENTE_ENDERECO VALUES ('38398756217', 1);
+INSERT INTO CLIENTE_ENDERECO VALUES ('27432874929', 1);
+INSERT INTO CLIENTE_ENDERECO VALUES ('32438247832', 5);
+
+INSERT INTO CATEGORIA (categ) VALUES ('Papelaria');
+INSERT INTO CATEGORIA (categ) VALUES ('Eletrônicos');
+INSERT INTO CATEGORIA (categ) VALUES ('Maquiagem');
+INSERT INTO CATEGORIA (categ) VALUES ('Bebidas');
+INSERT INTO CATEGORIA (categ) VALUES ('Alimentos');
+
+INSERT INTO PRODUTO (nome, cod_categ, preco) VALUES ('Lápis', 1, 1.50);
+INSERT INTO PRODUTO (nome, cod_categ, preco) VALUES ('Caderno', 1, 1.50);
+INSERT INTO PRODUTO (nome, cod_categ, preco) VALUES ('Celular', 2, 5500);
+INSERT INTO PRODUTO (nome, cod_categ, preco) VALUES ('Mouse', 2, 50);
+INSERT INTO PRODUTO (nome, cod_categ, preco) VALUES ('Teclado', 2, 100);
+
+INSERT INTO FORNECEDOR VALUES ('49375938530613', 'Papelaria Jeff');
+INSERT INTO FORNECEDOR VALUES ('28374872734823', 'Jardon Eletrônicos');
+INSERT INTO FORNECEDOR VALUES ('24828398402392', 'Papelaria Naylon');
+INSERT INTO FORNECEDOR VALUES ('32943902479723', 'Gerson Alimentos');
+INSERT INTO FORNECEDOR VALUES ('32849028423948', 'Clara Makeup');
+
+INSERT INTO FORNECEDOR_PRODUTO VALUES ('49375938530613', 1, '2021-02-03 22:10:34', 10);
+INSERT INTO FORNECEDOR_PRODUTO VALUES ('24828398402392', 2, '2022-09-07 09:10:55', 20);
+INSERT INTO FORNECEDOR_PRODUTO VALUES ('28374872734823', 3, '2022-09-06 17:37:41', 30);
+INSERT INTO FORNECEDOR_PRODUTO VALUES ('28374872734823', 4, '2022-06-22 14:52:33', 40);
+INSERT INTO FORNECEDOR_PRODUTO VALUES ('28374872734823', 5, '2021-12-04 23:21:41', 50);
+
+INSERT INTO ALTERASACOLA (cpf, cod_prod, op, qtd) VALUES ('04786277185', 1, 'I', 1);
+INSERT INTO ALTERASACOLA (cpf, cod_prod, op, qtd) VALUES ('38398756217', 1, 'I', 1);
+INSERT INTO ALTERASACOLA (cpf, cod_prod, op, qtd) VALUES ('32438247832', 5, 'I', 2);
+INSERT INTO ALTERASACOLA (cpf, cod_prod, op, qtd) VALUES ('04737482398', 3, 'I', 3);
+INSERT INTO ALTERASACOLA (cpf, cod_prod, op, qtd) VALUES ('27432874929', 1, 'I', 1);
+
+INSERT INTO PEDIDO (dataPedido, gasto, cpf, cod_end, numero) VALUES ('2022-09-01', recuperaGasto('04786277185'), '04786277185', 2, '4395839091758473');
+INSERT INTO PEDIDO (dataPedido, gasto, cpf, cod_end, numero) VALUES ('2022-09-02', recuperaGasto('38398756217'), '38398756217', 3, '4783948503493595');
+INSERT INTO PEDIDO (dataPedido, gasto, cpf, cod_end, numero) VALUES ('2022-09-03', recuperaGasto('32438247832'), '32438247832', 5, '4395839091758473');
+INSERT INTO PEDIDO (dataPedido, gasto, cpf, cod_end, numero) VALUES ('2022-09-03', recuperaGasto('04737482398'), '04737482398', 2, '4783948503493595');
+INSERT INTO PEDIDO (dataPedido, gasto, cpf, cod_end, numero) VALUES ('2022-09-04', recuperaGasto('27432874929'), '27432874929', 4, '4395839091758473');
+
+#SELECT * FROM maiorProcura;
+#SELECT * FROM CLIENTE;
+#SELECT * FROM ENDERECO;
+SELECT * FROM CARTAO;
+SELECT * FROM PEDIDO;
+#SELECT * FROM CATEGORIA;
+#SELECT * FROM FORNECEDOR;
+#SELECT * FROM PRODUTO;
+#SELECT * FROM ALTERASACOLA;
+#SELECT * FROM FORNECEDOR_PRODUTO;
+SELECT * FROM CLIENTE_CARTAO;
+SELECT * FROM CLIENTE_ENDERECO;
